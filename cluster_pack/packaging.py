@@ -16,7 +16,8 @@ from typing import (
     NamedTuple,
     Callable,
     Collection,
-    List
+    List,
+    Union
 )
 from urllib import parse, request
 import uuid
@@ -33,7 +34,7 @@ from pex.resolver import resolve_multi, Unsatisfiable, Untranslateable
 from pex.pex_info import PexInfo
 from pex.interpreter import PythonInterpreter
 
-from cluster_pack import filesystem
+from cluster_pack import filesystem, conda
 
 CRITEO_PYPI_URL = "http://build-nexus.prod.crto.in/repository/pypi/simple"
 
@@ -197,57 +198,7 @@ def pack_venv_in_conda(
         conda_pack.pack(output=output)
         return output
     else:
-        return create_and_pack_conda_env(output, reqs)
-
-
-def create_and_pack_conda_env(env_path: str, reqs: Dict[str, str]) -> str:
-    try:
-        _call(["conda"])
-    except CalledProcessError:
-        raise RuntimeError("conda is not available in $PATH")
-
-    env_path_split = env_path.split('.', 1)
-    env_name = env_path_split[0]
-    compression_format = env_path_split[1] if len(env_path_split) > 1 else ".zip"
-    archive_path = f"{env_name}.{compression_format}"
-
-    if os.path.exists(env_name):
-        shutil.rmtree(env_name)
-
-    _logger.info("Creating new env " + env_name)
-    python_version = sys.version_info
-    _call([
-        "conda", "create", "-p", env_name, "-y", "-q", "--copy",
-        f"python={python_version.major}.{python_version.minor}.{python_version.micro}"
-    ], env=dict(os.environ))
-
-    env_python_bin = os.path.join(env_name, "bin", "python")
-    if not os.path.exists(env_python_bin):
-        raise RuntimeError(
-            "Failed to create Python binary at " + env_python_bin)
-
-    _logger.info("Installing packages into " + env_name)
-    _call([env_python_bin, "-m", "pip", "install"] +
-          format_requirements(reqs))
-
-    if os.path.exists(archive_path):
-        os.remove(archive_path)
-
-    conda_pack.pack(prefix=env_name, output=archive_path)
-    return archive_path
-
-
-def _call(cmd, **kwargs):
-    _logger.info(" ".join(cmd))
-    proc = Popen(cmd, stdout=PIPE, stderr=PIPE, **kwargs)
-    out, err = proc.communicate()
-    if proc.returncode:
-        _logger.error(out)
-        _logger.error(err)
-        raise CalledProcessError(proc.returncode, cmd)
-    else:
-        _logger.debug(out)
-        _logger.debug(err)
+        return conda.create_and_pack_conda_env(reqs=format_requirements(reqs), output=output)
 
 
 class Packer(NamedTuple):
@@ -269,7 +220,7 @@ def get_env_name(env_var_name) -> str:
 
 CONDA_PACKER = Packer(
     get_env_name(CONDA_DEFAULT_ENV),
-    'zip',
+    'tar.gz',
     pack_venv_in_conda
 )
 PEX_PACKER = Packer(
