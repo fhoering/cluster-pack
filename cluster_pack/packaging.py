@@ -16,7 +16,8 @@ from typing import (
     NamedTuple,
     Callable,
     Collection,
-    List
+    List,
+    Union
 )
 from urllib import parse, request
 import uuid
@@ -33,7 +34,7 @@ from pex.resolver import resolve_multi, Unsatisfiable, Untranslateable
 from pex.pex_info import PexInfo
 from pex.interpreter import PythonInterpreter
 
-from cluster_pack import filesystem
+from cluster_pack import filesystem, conda
 
 CRITEO_PYPI_URL = "http://build-nexus.prod.crto.in/repository/pypi/simple"
 
@@ -107,7 +108,17 @@ def _walk_and_do(fn, src_dir):
             fn(src_file_path, dst_path)
 
 
-def pack_in_pex(requirements: Dict[str, str],
+def pack_spec_in_pex(spec_file: str,
+                     output: str,
+                     pex_inherit_path: str = "prefer") -> str:
+    with open(spec_file, "r") as f:
+        lines = [line for line in f.read().splitlines()
+                 if line and not line.startswith("#")]
+        _logger.debug(f"used requirements: {lines}")
+        return pack_in_pex(lines, output, pex_inherit_path=pex_inherit_path)
+
+
+def pack_in_pex(requirements: Union[List[str], Dict[str, str]],
                 output: str,
                 ignored_packages: Collection[str] = [],
                 pex_inherit_path: str = "prefer",
@@ -136,7 +147,10 @@ def pack_in_pex(requirements: Dict[str, str],
         _logger.debug("Add current path as source", current_package)
         _walk_and_do(pex_builder.add_source, current_package)
 
-    requirements_to_install = format_requirements(requirements)
+    if isinstance(requirements, List):
+        requirements_to_install = requirements
+    else:
+        requirements_to_install = format_requirements(requirements)
 
     try:
         resolveds = resolve_multi(
@@ -187,6 +201,15 @@ def pack_current_venv_in_pex(
     return pack_in_pex(reqs, output, ignored_packages, editable_requirements=editable_requirements)
 
 
+def pack_conda_spec(spec_file: str, output: str):
+    project_env_name = conda.get_conda_env_name(spec_file)
+
+    _logger.info(f"Found project env name {project_env_name}")
+    env_path = conda.get_or_create_conda_env(project_env_name)
+
+    return conda_pack.pack(prefix=env_path, output=output, force=True)
+
+
 def pack_venv_in_conda(
         output: str,
         reqs: Dict[str, str],
@@ -197,43 +220,26 @@ def pack_venv_in_conda(
         conda_pack.pack(output=output)
         return output
     else:
-        return create_and_pack_conda_env(output, reqs)
+        return create_and_pack_conda_env(reqs)
 
 
-def create_and_pack_conda_env(env_path: str, reqs: Dict[str, str]) -> str:
-    try:
-        _call(["conda"])
-    except CalledProcessError:
-        raise RuntimeError("conda is not available in $PATH")
+def create_and_pack_conda_env(reqs: Dict[str, str]) -> str:
+    project_env_name = conda.get_conda_env_name(reqs=reqs)
 
-    env_path_split = env_path.split('.', 1)
-    env_name = env_path_split[0]
-    compression_format = env_path_split[1] if len(env_path_split) > 1 else ".zip"
-    archive_path = f"{env_name}.{compression_format}"
+    _logger.info(f"Found project env name {project_env_name}")
+    env_path = conda.get_or_create_conda_env(project_env_name)
 
-    if os.path.exists(env_name):
-        shutil.rmtree(env_name)
+    if reqs:
+        env_python_bin = os.path.join(env_path, "bin", "python")
+        if not os.path.exists(env_python_bin):
+            raise RuntimeError(
+                "Failed to create Python binary at " + env_python_bin)
 
-    _logger.info("Creating new env " + env_name)
-    python_version = sys.version_info
-    _call([
-        "conda", "create", "-p", env_name, "-y", "-q", "--copy",
-        f"python={python_version.major}.{python_version.minor}.{python_version.micro}"
-    ], env=dict(os.environ))
+        _logger.info("Installing packages into " + env_path)
+        _call([env_python_bin, "-m", "pip", "install"] +
+            format_requirements(reqs))
 
-    env_python_bin = os.path.join(env_name, "bin", "python")
-    if not os.path.exists(env_python_bin):
-        raise RuntimeError(
-            "Failed to create Python binary at " + env_python_bin)
-
-    _logger.info("Installing packages into " + env_name)
-    _call([env_python_bin, "-m", "pip", "install"] +
-          format_requirements(reqs))
-
-    if os.path.exists(archive_path):
-        os.remove(archive_path)
-
-    conda_pack.pack(prefix=env_name, output=archive_path)
+    archive_path = conda_pack.pack(prefix=env_path, force=True)
     return archive_path
 
 
@@ -248,12 +254,14 @@ def _call(cmd, **kwargs):
     else:
         _logger.debug(out)
         _logger.debug(err)
+          return proc.returncode, stdout, stderr
 
 
 class Packer(NamedTuple):
     env_name: str
     extension: str
     pack: Callable[[str, Dict[str, str], Dict[str, str], Collection[str], Dict[str, str]], str]
+    pack_from_spec: Callable[[str, str], str]
 
 
 def get_env_name(env_var_name) -> str:
@@ -269,13 +277,15 @@ def get_env_name(env_var_name) -> str:
 
 CONDA_PACKER = Packer(
     get_env_name(CONDA_DEFAULT_ENV),
-    'zip',
-    pack_venv_in_conda
+    'tar.gz',
+    pack_venv_in_conda,
+    lambda spec_file, output: pack_conda_spec(spec_file, output)
 )
 PEX_PACKER = Packer(
     get_env_name('VIRTUAL_ENV'),
     'pex',
-    pack_current_venv_in_pex
+    pack_current_venv_in_pex,
+    lambda spec_file, output: pack_spec_in_pex(spec_file, output)
 )
 
 
@@ -311,6 +321,15 @@ def detect_archive_names(
                              f", .{packer.extension} is expected")
 
     return package_path, env_name, pex_file
+
+
+def detect_packer_from_spec(spec_file: str) -> Packer:
+    if spec_file.endswith('.yaml') or spec_file.endswith('.yml'):
+        return CONDA_PACKER
+    elif os.path.basename(spec_file) == "requirements.txt":
+        return PEX_PACKER
+    else:
+        raise ValueError("Archive format unsupported. Must be .pex or conda .zip")
 
 
 def detect_packer_from_env() -> Packer:

@@ -16,6 +16,8 @@ from pex.pex_info import PexInfo
 
 from cluster_pack import packaging, filesystem
 
+import tarfile
+
 
 MODULE_TO_TEST = "cluster_pack.packaging"
 MYARCHIVE_FILENAME = "myarchive.pex"
@@ -112,18 +114,17 @@ def conda_is_available():
 @pytest.mark.skipif(not conda_is_available(), reason="conda is not available")
 def test_create_conda_env():
     with tempfile.TemporaryDirectory() as tempdir:
-        env_path = os.path.join(tempdir, "conda_env.zip")
         env_zip_path = packaging.create_and_pack_conda_env(
-            env_path=env_path,
             reqs={"pycodestyle": "2.5.0"}
         )
+        print(env_zip_path)
         assert os.path.isfile(env_zip_path)
-        env_path, _zip = os.path.splitext(env_zip_path)
-        assert os.path.isdir(env_path)
 
         env_unzipped_path = os.path.join(tempdir, "conda_env_unzipped")
-        with zipfile.ZipFile(env_zip_path) as zf:
+        with tarfile.open(env_zip_path) as zf:
             zf.extractall(env_unzipped_path)
+
+        print(env_unzipped_path)
 
         env_python_bin = os.path.join(env_unzipped_path, "bin", "python")
         os.chmod(env_python_bin, 0o755)
@@ -223,4 +224,23 @@ def test_pack_in_pex_include_editable_requirements():
                 "-c",
                 ("""print("Start importing user-lib..");import user_lib;"""
                  """print("Successfully imported user-lib!")""")]
+            ))
+
+
+def test_pack_in_pex_from_spec():
+    with tempfile.TemporaryDirectory() as tempdir:
+        tempdir = "/tmp"
+        spec_file = os.path.join(os.path.dirname(__file__), "resources", "requirements.txt")
+        packaging.pack_spec_in_pex(
+            spec_file,
+            f"{tempdir}/out.pex",
+            # make isolated pex from current pytest virtual env
+            pex_inherit_path="false")
+        assert os.path.exists(f"{tempdir}/out.pex")
+        with does_not_raise():
+            print(subprocess.check_output([
+                f"{tempdir}/out.pex",
+                "-c",
+                ("""print("Start importing cloudpickle..");import cloudpickle;"""
+                 """assert cloudpickle.__version__ == '1.4.1'""")]
             ))
