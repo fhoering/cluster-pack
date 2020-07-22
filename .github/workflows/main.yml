@@ -24,3 +24,22 @@ jobs:
 
     - name: Run spark Job
       run: docker exec spark-master ./examples/spark-with-S3/scripts/run_spark_example.sh
+
+
+  conda_tests:
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: setup-conda
+        uses: s-weigand/setup-conda@v1.0.3
+
+      - name: create env
+        run: |
+          conda create -y --name test_env python=3.6 
+          source activate test_env
+          pip install .
+          pip install -r tests-requirements.txt
+
+      - name: conda tests
+        run: pytest -m conda -s tests --log-cli-level=DEBUG
+    

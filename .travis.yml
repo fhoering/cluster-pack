@@ -10,7 +10,7 @@ jobs:
     install: 
       - pip install .
       - pip install -r tests-requirements.txt
-    script: pytest -s tests
+    script: pytest -m "not conda" -s tests
   - name: TOXENV=mypy
     script: tox -v -e mypy
   - name: TOXENV=env-check
